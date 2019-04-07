@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+# -*- coding:utf-8 -*-
+
+import sys
+from _dict import play_sound, download_sound, download_word, show_word
+
+def help_exit():
+    print("useage:  %s [Speech] word" % sys.argv[0])
+    print("Speech options:  -k uk-speech")
+    print("                 -s us-speech")
+    exit()
+
+def main():
+    speech = None
+    try:
+        if sys.argv[1] == "-s":
+            speech = "us-speech"
+        elif sys.argv[1] == "-k":
+            speech = "uk-speech"
+        else:
+            word = sys.argv[1]
+    
+        if speech:
+            word = sys.argv[2]
+    except:
+        help_exit()
+
+    result = download_word(word)
+    
+    if not result:
+        return -1
+
+    show_word(result)
+    
+    if speech:
+        try:
+            download_sound(result, speech)
+            play_sound(result)
+        except KeyError:
+            print("no available speech")
+
+main()

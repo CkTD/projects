@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+# -*- coding:utf-8 -*-
+
+import os
+import sys
+
+import pickle
+from dictconf import localDir
+from _dict import download_word, download_sound, show_word, play_sound
+
+vnbpath = os.path.join(localDir,"nb.pkl")
+
+
+def load_note():
+    if os.path.isfile(vnbpath):
+        try:
+            with open(vnbpath, 'rb') as f:
+                return pickle.load(f)
+        except Exception:
+            pass
+    else:
+        return {}
+
+def stor_note(note):
+    with open(vnbpath, 'wb') as f:
+        pickle.dump(note, f)
+
+
+
+def _add(word, note):
+    if word not in note:
+        res = download_word(word)
+        if not res:
+            return False
+        download_sound(res, "uk-speech")
+        note[word] = res
+        return True
+    else:
+        print("%s already in note!" % word)
+        return False
+    
+def _delete(word, note):
+    if word in note:
+        del note[word]
+        return True
+    else:
+        print("%s not in note!" % word)
+        return False
+
+def _show(word, note):
+    if word in note:
+        show_word(note[word])
+        return note[word]
+    else:
+        print("%s not in note!" % word)
+
+def _list(s, note):
+    wl = note.keys()
+    for i in sorted(wl):
+        if i.startswith(s):
+            print(i)
+
+def _pro(word, note):
+    res = _show(word, note)
+    if res:
+        play_sound(res)
+
+
+def add(word):
+    note = load_note()
+    if _add(word, note):
+        stor_note(note)
+
+def delete(word):
+    note = load_note()
+    if _delete(word, note):
+        stor_note(note)
+
+def show(word):
+    note = load_note()
+    _show(word, note)
+
+def list(s):
+    note = load_note()
+    _list(s,note)
+
+def pro(word):
+    note = load_note()
+    _pro(word, note)
+
+def inter():
+    opfun = {'d':_delete,
+             'a':_add,
+             's':_show,
+             'l':_list,
+             'p':_pro,
+             'q':None}
+    
+    note = load_note()
+    modify = False
+    
+    while True:
+        try:
+            cmd = input(">>> ").strip().split(' ')
+        except EOFError:
+            print("")
+            break
+        
+        if not cmd:
+            continue
+
+        if cmd[0] not in opfun:
+            inter_help()
+            continue
+
+        if len(cmd) == 1:
+            if cmd[0] == 'q':
+                break
+            elif cmd[0] == 'l':
+                cmd.append('')
+            else:
+                inter_help()
+                continue
+        elif len(cmd) != 2:
+            print("too many args")
+            continue
+
+        if cmd[0] == 'a' or cmd[0] == 'd':
+            modify = True
+
+        opfun[cmd[0]](cmd[1],note) 
+
+    if modify:
+        stor_note(note)
+
+def inter_help():
+    print("all command:")
+    print("    a|d|s|p| word")
+    print("    l [startswith]")
+
+
+def help():
+    print("useage note [d|a|s|p|l] [word|starts]")
+
+
+
+def main():
+    opfun = {'d':delete,
+             'a':add,
+             's':show,
+             'p':pro,
+             'l':list}
+    if len(sys.argv) == 1:
+        inter()
+    elif len(sys.argv) == 2:
+        if sys.argv[1] == 'l':
+            list("")
+        else:
+            help_exit()
+    elif len(sys.argv) == 3:
+        try:
+            opfun[sys.argv[1]](sys.argv[2])
+        except KeyError:
+            help()
+    else:
+        help()
+
+if __name__ == '__main__':
+    main()
