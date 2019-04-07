@@ -1,1 +1,1 @@
-collections of projects, assignment or just for fun
+collection of assignments or just for fun
