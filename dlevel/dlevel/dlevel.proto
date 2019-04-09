@@ -1,0 +1,35 @@
+syntax = "proto2";
+
+package dlevel;
+option cc_generic_services = true;
+
+// 所有请求使用同一个消息类型，据体由 ActionType 指定
+message DlevelRequest {
+    enum ActionType {
+        OPEN = 1;
+        CLOSE = 2;
+        GET = 3;
+        PUT = 4;
+        DELETE = 5;
+    }
+    required int32 id = 1;
+    required ActionType actiontype = 2 [default = GET];
+    required string key = 3; 
+    optional string value = 4;
+    
+};
+
+
+message DlevelResponse {
+    // 操作是否成功
+    required bool success = 1;
+    
+    // success = False 时 value 为 errstr
+    // success = True , ActionType 为 GET 时为 GET 得到的结果 , 否则无意义
+    optional string value = 2;
+    optional string redirect = 3;
+};
+
+service DlevelService {
+    rpc handler(DlevelRequest) returns (DlevelResponse);
+};

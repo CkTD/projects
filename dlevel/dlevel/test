@@ -1,0 +1,10 @@
+#!/bin/bash
+cmake . 
+make -j4
+rm -rf runtime
+bash stop.sh 2>/dev/null
+bash run_server.sh
+sleep 5
+bash run_client.sh
+sleep 5
+bash stop.sh
