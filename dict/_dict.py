@@ -11,7 +11,6 @@ import json
 import os, sys
 
 def show_word(res):
-
     print(" %s:" %res['query'])
     print("")
     print("    Basic:  %s" %res["translation"][0])
@@ -103,8 +102,8 @@ def download_word(word):
             print("API Error, code %s", res['errorCode'])
             return None
     
-        if not "basic" in res:
-            print("Unknow %s"%res['query'])
+        if "basic" not in res or res["basic"] is None:
+            print("Not Found!")
             return None
         return res
     except Exception as e:
