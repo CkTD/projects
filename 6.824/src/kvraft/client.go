@@ -2,8 +2,8 @@ package kvraft
 
 import (
 	"crypto/rand"
+	"fmt"
 	"math/big"
-    "fmt"
 	"time"
 
 	"../labrpc"
@@ -64,24 +64,38 @@ func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 	value := ""
 	ck.MessageID++
-    ck.Dprintf("get[%d] %s", ck.MessageID, key)
+	ck.Dprintf("get[%d] %s", ck.MessageID, key)
 	for {
 		args := GetArgs{Key: key, ClientID: ck.clientID, MessageID: ck.MessageID}
 		reply := GetReply{}
-		ok := ck.servers[ck.leaderID].Call("KVServer.Get", &args, &reply)
+
+		okCh := make(chan bool)
+		var ok bool
+		go func() {
+			ok := ck.servers[ck.leaderID].Call("KVServer.Get", &args, &reply)
+			okCh <- ok
+		}()
+
+		select {
+		case ok = <-okCh:
+		case <-time.After(time.Second * 2):
+			ok = false
+		}
+
 		if !ok || reply.Err == ErrWrongLeader { // try another
-		    ck.Dprintf("retry get[%d] %s", ck.MessageID, key)
+			ck.Dprintf("retry get[%d] %s", ck.MessageID, key)
 			ck.leaderID = (ck.leaderID + 1) % ck.peersNum
-		} else if reply.Err == OK { // success
+		} else { // success
 			if reply.Err == OK {
 				value = reply.Value
 			} else if reply.Err == ErrNoKey {
 			} else {
 				panic("...")
 			}
-		    ck.Dprintf("done get[%d] %s->%s", ck.MessageID, key, reply.Value)
+			ck.Dprintf("done get[%d] %s->%s", ck.MessageID, key, reply.Value)
 			break
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	return value
 }
@@ -103,19 +117,34 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		args := PutAppendArgs{Key: key, Value: value, Op: op, ClientID: ck.clientID, MessageID: ck.MessageID}
 		reply := PutAppendReply{}
-		ok := ck.servers[ck.leaderID].Call("KVServer.PutAppend", &args, &reply)
+
+		okCh := make(chan bool)
+		var ok bool
+		go func() {
+			ok := ck.servers[ck.leaderID].Call("KVServer.PutAppend", &args, &reply)
+			okCh <- ok
+		}()
+
+		select {
+		case ok = <-okCh:
+		case <-time.After(time.Second * 2):
+			ok = false
+		}
+
 		if !ok || reply.Err == ErrWrongLeader {
-		    ck.Dprintf("retry %s[%d] %s[%s]", op, ck.MessageID, key, value)
+			ck.Dprintf("retry %s[%d] %s[%s]", op, ck.MessageID, key, value)
 			ck.leaderID = (ck.leaderID + 1) % ck.peersNum
 		} else if reply.Err == OK { // success
-		    ck.Dprintf("done %s[%d] %s->%s", op, ck.MessageID, key, reply.Value)
+			ck.Dprintf("done %s[%d] %s->%s", op, ck.MessageID, key, reply.Value)
 			if reply.Err == OK {
 			} else {
 				panic("...")
 			}
 			break
+		} else {
+			panic("??")
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

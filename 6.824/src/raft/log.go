@@ -42,7 +42,13 @@ func (l *Log) GetRange(start, end int) ([]LogEntry, bool) {
 	if end == -1 {
 		end = l.LastIndex()
 	}
-	return l.Entries[start-l.PrevIndex-1 : end-l.PrevIndex], true
+
+    res := l.Entries[start-l.PrevIndex-1 : end-l.PrevIndex]
+    // make a copy of logs. 
+    // append entries rpc read the returned logs but not protected by lock.
+    dst := make([]LogEntry, len(res))
+    copy(dst, res)
+	return dst, true
 }
 
 func (l *Log) GetTerm(index int) int {

@@ -12,7 +12,7 @@ import (
 	"../raft"
 )
 
-const Debug = 1
+const Debug = 0
 
 type Op struct {
 	// Your definitions here.
@@ -90,7 +90,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	} else {
 		kv.DPrintf("start get for[%d %d] %s...",
 			args.ClientID, args.MessageID, args.Key)
-		ch := make(chan OpResult)
+		ch := make(chan OpResult, 1)
 		opI := OpIdentifier{Index: index, Term: term}
 
 		kv.mu.Lock()
@@ -129,7 +129,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	} else {
 		kv.DPrintf("start %s for [%d %d] %s[%s]",
 			args.Op, args.ClientID, args.MessageID, args.Key, args.Value)
-		ch := make(chan OpResult)
+		ch := make(chan OpResult, 1)
 		opI := OpIdentifier{Index: index, Term: term}
 
 		kv.mu.Lock()
@@ -163,9 +163,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 // to suppress debug output from a Kill()ed instance.
 //
 func (kv *KVServer) Kill() {
-	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
-	// Your code here, if desired.
+	atomic.StoreInt32(&kv.dead, 1)
 	kv.DPrintf("stopped")
 }
 
@@ -176,6 +175,10 @@ func (kv *KVServer) killed() bool {
 
 func (kv *KVServer) apply() {
 	for m := range kv.applyCh {
+		if kv.killed() {
+			break
+		}
+
 		if !m.CommandValid {
 			kv.readSnapshot(m.Command.([]byte))
 			continue
@@ -188,8 +191,8 @@ func (kv *KVServer) apply() {
 		messageID := op.MessageID
 
 		var res OpResult
-
 		kv.mu.Lock()
+
 		latest, exist := kv.latestMessage[clientID]
 		if exist && messageID == latest.MessageID {
 			res = latest.Result
@@ -216,7 +219,9 @@ func (kv *KVServer) apply() {
 		ch, exist := kv.opCh[OpIdentifier{Term: term, Index: index}]
 		if exist {
 			kv.DPrintf("reply to [%d] log[%d]:%v", clientID, index, op)
-			// The msg in the channel must be read as soon as possible. deadlock?
+			// use buffered channel.
+			// if wait timeout, no one recieve on the channel,
+			// we may get the lock before the channel can be deleted
 			ch <- res
 		}
 		kv.lastIndex = index
@@ -226,24 +231,32 @@ func (kv *KVServer) apply() {
 
 // monitor the raft state size, snapshot if it is too big
 func (kv *KVServer) snapshot() {
-	for s := range kv.rf.SnapshotCh {
-		if s.Force || s.StateSize >= kv.maxraftstate {
+	for s := range kv.rf.StateSizeCh {
+		if kv.killed() {
+			break
+		}
+
+		if s >= kv.maxraftstate {
+			kv.mu.Lock()
+
 			kv.DPrintf("snapshot: current state size: [%d], max: [%d]", s, kv.maxraftstate)
 
 			w := new(bytes.Buffer)
 			e := labgob.NewEncoder(w)
 
-			kv.mu.Lock()
 			lastIndex := kv.lastIndex
 			e.Encode(kv.lastIndex)
 			e.Encode(kv.table)
 			e.Encode(kv.latestMessage)
-			kv.mu.Unlock()
 
 			data := w.Bytes()
+
+			kv.mu.Unlock()
+
+            // don't call rf.SnapShot with lock.
+            // 
 			kv.rf.SnapShot(data, lastIndex)
 		}
-
 	}
 }
 

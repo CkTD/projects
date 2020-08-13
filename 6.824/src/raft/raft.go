@@ -20,6 +20,7 @@ package raft
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,13 +48,6 @@ type ApplyMsg struct {
 	Command      interface{}
 	CommandIndex int
 	CommandTerm  int
-}
-
-// after Raft log size change or Raft want to make a latest snapsht
-// raft send an SnapShotMsg to the service
-type SnapShotMsg struct {
-	StateSize int
-	Force     bool
 }
 
 const (
@@ -105,11 +99,12 @@ type Raft struct {
 	appendEntriesInterval time.Duration
 
 	//For snapshot
-	SnapshotCh chan SnapShotMsg
+	//send state size when it chagne
+	StateSizeCh chan int
 }
 
 // Debugging
-const Debug = 1
+const Debug = 0
 
 // DPrintf print msg with some important state
 func (rf *Raft) DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -154,7 +149,7 @@ func (rf *Raft) persist() {
 	rf.persister.SaveRaftState(state)
 
 	select {
-	case rf.SnapshotCh <- SnapShotMsg{rf.persister.RaftStateSize(), false}:
+	case rf.StateSizeCh <- rf.persister.RaftStateSize():
 	default:
 	}
 
@@ -182,7 +177,7 @@ func (rf *Raft) readPersist(state []byte) {
 		rf.currentTerm = currentTerm
 		rf.votedFor = voteFor
 		rf.log = log
-		rf.matchIndex[rf.me] = rf.log.LastIndex()
+		//rf.matchIndex[rf.me] = rf.log.LastIndex()
 		rf.commitIndex = rf.log.PrevIndex
 		rf.lastApplied = rf.log.PrevIndex
 	}
@@ -417,28 +412,28 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	// ignore outdated install snapshot rpc
 	if rf.log.Find(args.LastIncludedTerm, args.LastIncludedIndex) == exist {
-		rf.DPrintf("install snapshot: ignore, already exist. LastIncluded[Term %d Index %d], current last[%d, %d]",
+		rf.DPrintf("install snapshot: ignore, LastIncluded[Term %d Index %d] already exist, current last[%d, %d]",
 			args.LastIncludedTerm, args.LastIncludedIndex, rf.log.LastTerm(), rf.log.LastIndex())
 		return
 	}
-
-	if rf.log.LastTerm() == args.Term && rf.log.LastIndex() > args.LastIncludedIndex {
-		rf.DPrintf("install snapshot: ignore, don't overwrite. LastIncluded[Term %d Index %d], current last[%d, %d]",
-			args.LastIncludedTerm, args.LastIncludedIndex, rf.log.LastTerm(), rf.log.LastIndex())
+	if rf.lastApplied >= args.LastIncludedIndex {
+		rf.DPrintf("install snapshot: ignore, LastIncluded[Term %d Index %d] already applied, last applied[%d]",
+			args.LastIncludedTerm, args.LastIncludedIndex, rf.lastApplied)
 		return
 	}
 
-	// discard log
-	rf.DPrintf("install Snapshot: LastIncluded[Term %d Index %d], current last[%d, %d]",
-		args.LastIncludedTerm, args.LastIncludedIndex, rf.log.LastTerm(), rf.log.LastIndex())
-	rf.log = MakeLog(args.LastIncludedTerm, args.LastIncludedIndex)
+	// discard logs
+	rf.log.DiscardBefore(Min(args.LastIncludedIndex+1, rf.log.LastIndex()+1))
+	rf.log.PrevIndex = args.LastIncludedIndex
+	rf.log.PrevTerm = args.LastIncludedTerm
 	rf.lastApplied = args.LastIncludedIndex
-	rf.commitIndex = args.LastIncludedIndex
+	rf.commitIndex = Max(rf.commitIndex, args.LastIncludedIndex)
 
+	//persist state and snapshot
 	state := rf.encodeState()
 	rf.persister.SaveStateAndSnapshot(state, args.Data)
 
-	// install the snapshot to application
+	// install the snapshot to service
 	msg := ApplyMsg{
 		CommandValid: false,
 		Command:      args.Data,
@@ -543,33 +538,29 @@ func (rf *Raft) appendEntryToServer(s, term int) {
 		rf.nextIndex[s] = nextIndex
 		Assert(rf.nextIndex[s] <= rf.log.LastIndex()+1, "index out of range")
 	} else if len(l) > 0 { // AE success and some logs copied to follower -> try commit
-		rf.DPrintf("AE success for follower[%d], matchIndex[%d]->[%d]",
+		rf.DPrintf("AE: success for follower[%d], matchIndex[%d]->[%d]",
 			s, rf.matchIndex[s], args.PrevLogIndex+len(l))
-		rf.nextIndex[s] = args.PrevLogIndex + len(l) + 1
-		rf.matchIndex[s] = rf.nextIndex[s] - 1
+		rf.matchIndex[s] = args.PrevLogIndex + len(l)
+		rf.nextIndex[s] = rf.matchIndex[s] + 1
 
 		Assert(rf.nextIndex[s] <= rf.log.LastIndex()+1, "index out of range")
 
 		// Check commit
-		N := rf.log.LastIndex()
+		m := make([]int, len(rf.matchIndex))
+		copy(m, rf.matchIndex)
+		sort.Ints(m)
+		N := Max(rf.commitIndex, m[rf.majorityNum-1])
 		for N > rf.commitIndex {
 			if rf.log.GetTerm(N) == rf.currentTerm {
-				a := 0
-				for _, m := range rf.matchIndex {
-					if m >= N {
-						a++
-					}
-				}
-				if a >= rf.majorityNum {
-					break
-				}
+				break
 			}
 			N--
 		}
+
 		if N != rf.commitIndex {
 			rf.DPrintf("commit index [%d]->[%d]", rf.commitIndex, N)
-			rf.commitIndex = N
 		}
+		rf.commitIndex = N
 	}
 }
 
@@ -582,18 +573,6 @@ func (rf *Raft) installSnapshotToServer(s, term int) {
 		return
 	}
 
-	// never delete logs that have been successfully replicated to follower
-	// nofity service to update snapshot and try again later
-	if rf.matchIndex[s] > rf.log.PrevIndex ||
-		(rf.log.LastTerm() < rf.currentTerm && rf.log.PrevIndex != rf.log.LastIndex()) {
-		select {
-		case rf.SnapshotCh <- SnapShotMsg{rf.persister.RaftStateSize(), true}:
-		default:
-		}
-		return
-	}
-
-	rf.DPrintf("install snapshot to [%d] for index: [%d], nextIndex: [%d]", s, rf.log.PrevIndex, rf.nextIndex[s])
 	args := InstallSnapshotArgs{Term: rf.currentTerm,
 		LeaderID:          rf.me,
 		LastIncludedTerm:  rf.log.PrevTerm,
@@ -648,6 +627,10 @@ func (rf *Raft) appendEntryTimeoutHandler() {
 // caller lock the mutex
 // return immediately
 func (rf *Raft) applyLogHandler() {
+	if rf.commitIndex > rf.lastApplied {
+		rf.DPrintf("apply log [%d]->[%d]", rf.lastApplied+1, rf.commitIndex)
+	}
+
 	for rf.commitIndex > rf.lastApplied {
 		rf.lastApplied++
 		msg := ApplyMsg{
@@ -656,16 +639,15 @@ func (rf *Raft) applyLogHandler() {
 			CommandIndex: rf.lastApplied,
 			CommandTerm:  rf.log.GetTerm(rf.lastApplied),
 		}
-		rf.DPrintf("apply log[%d]", msg.CommandIndex)
 		rf.applyCH <- msg
 	}
 }
 
 func (rf *Raft) periodicTask() {
-	for {
-		time.Sleep(time.Millisecond * 20)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-		rf.mu.Lock()
+	for !rf.killed() {
 		if rf.state == leader { // leader send appendEntries periodically
 			if time.Since(rf.lastAppendEntries) > rf.appendEntriesInterval {
 				rf.DPrintf("send append entries")
@@ -681,7 +663,10 @@ func (rf *Raft) periodicTask() {
 		// apply log periodically here is much easier than call it every time new logs are
 		// commited (log must be applied in order and avoid deadlock when snapshot)
 		rf.applyLogHandler()
+
 		rf.mu.Unlock()
+		time.Sleep(time.Millisecond * 20)
+		rf.mu.Lock()
 	}
 }
 
@@ -703,23 +688,22 @@ func (rf *Raft) GetState() (int, bool) {
 
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
-// check whether Kill() has been called. the use of atomic avoids the
-// need for a lock.
+// check whether Kill() has been called.
 //
 // the issue is that long-running goroutines use memory and may chew
 // up CPU time, perhaps causing later tests to fail and generating
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
 //
+
 func (rf *Raft) Kill() {
-	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	rf.DPrintf("stopped")
+	atomic.StoreInt32(&rf.dead, 1)
+	//fmt.Printf("raft[%d] stopped\n", rf.me)
 }
 
 func (rf *Raft) killed() bool {
-	z := atomic.LoadInt32(&rf.dead)
-	return z == 1
+	return atomic.LoadInt32(&rf.dead) == 1
 }
 
 //
@@ -737,12 +721,13 @@ func (rf *Raft) killed() bool {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
 	// Your code here (2B).
 	rf.mu.Lock()
-	isLeader = rf.state == leader
+	defer rf.mu.Unlock()
+
+	index := -1
+	term := -1
+	isLeader := rf.state == leader
 	if isLeader {
 		rf.log.Append(LogEntry{Term: rf.currentTerm, Command: command})
 		rf.matchIndex[rf.me] = rf.log.LastIndex()
@@ -753,7 +738,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// pass test quickly...
 		rf.appendEntryTimeoutHandler()
 	}
-	rf.mu.Unlock()
 
 	return index, term, isLeader
 }
@@ -776,7 +760,7 @@ func (rf *Raft) SnapShot(snapshot []byte, lastIncludedIndex int) {
 	// 2. leader installed snapshot that includeing more logs than this
 	// ignore when another succeeded SnapShot including more logs than this
 	if rf.lastApplied < lastIncludedIndex || rf.log.PrevIndex >= lastIncludedIndex {
-		rf.DPrintf("take snapshot: ignore[%d], installed an snapshot from leader before we can apply the one given by service", lastIncludedIndex)
+		rf.DPrintf("take snapshot: ignore[%d], lastApplied:[%d], PrevIndex:[%d]", lastIncludedIndex, rf.lastApplied, rf.log.PrevIndex)
 		return
 	}
 
@@ -808,6 +792,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.dead = 0
 	rf.applyCH = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
@@ -840,7 +825,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.appendEntriesInterval = time.Millisecond * 120
 
 	// notify application when log size change
-	rf.SnapshotCh = make(chan SnapShotMsg)
+	rf.StateSizeCh = make(chan int)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
